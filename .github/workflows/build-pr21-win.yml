@@ -1,3 +1,7 @@
+# Build MoE4All Windows package from PR #21 (MTP + Vision)
+# + 8GB-VRAM patch:
+#   1) load_driver 2GB→1GB（WDDM 沉淀税砍半，7600 真实开销远小于 7900 XTX）
+#   2) runtime margin 仅在小显存设备(<8GB)钳制到 768MB；大卡保持原值不受影响
 name: Build MoE4All PR21 (Vision+ViewModel)
 
 on:
@@ -14,7 +18,7 @@ env:
 
 jobs:
   build:
-    name: Build MoE4All Windows (PR #21)
+    name: Build MoE4All Windows (PR #21, 8GB patch)
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -35,13 +39,50 @@ jobs:
         shell: pwsh
         run: .\scripts\install-vulkan-sdk-windows.ps1
 
+      - name: Patch VRAM constants for small-VRAM cards
+        shell: pwsh
+        run: |
+          $p = 'crates/infr-llama/src/seam/mod.rs'
+          $t = Get-Content $p -Raw
+          if (-not $t) { throw "cannot read $p" }
+
+          # 1) WDDM ReBAR 沉淀税 2GB -> 1GB（所有设备皆可受益；8GB 卡是刚需）
+          $old1 = 'const WINDOWS_LARGE_REBAR_LOAD_DRIVER_RESERVE: u64 = 2 * 1024 * 1024 * 1024;'
+          $new1 = 'const WINDOWS_LARGE_REBAR_LOAD_DRIVER_RESERVE: u64 = 1 * 1024 * 1024 * 1024;'
+          if ($t.Contains($old1)) {
+              $t = $t.Replace($old1, $new1)
+              Write-Host '[OK] load_driver: 2GB -> 1GB'
+          } else {
+              throw 'PATCH1 anchor not found'
+          }
+
+          # 2) runtime margin：仅 total_room < 8GB 的设备钳制到 768MB；大卡保持原值
+          $old2 = '.prepare_moe_unified_vram(&specs, plan.runtime_reserve_bytes as usize)'
+          $new2 = @'
+.prepare_moe_unified_vram(&specs,
+                if plan.total_room_bytes < 8 * 1024 * 1024 * 1024 {
+                    (plan.runtime_reserve_bytes as usize).min(768 * 1024 * 1024)
+                } else {
+                    plan.runtime_reserve_bytes as usize
+                })
+'@
+          if ($t.Contains($old2)) {
+              $t = $t.Replace($old2, $new2)
+              Write-Host '[OK] runtime margin: clamped to 768MB only when total_room < 8GB'
+          } else {
+              throw 'PATCH2 anchor not found'
+          }
+
+          [System.IO.File]::WriteAllText($p, $t, [System.Text.UTF8Encoding]::new($false))
+          Write-Host '[OK] patched seam/mod.rs'
+
       - name: Build infr.exe
         run: cargo build --release --locked -p infr-cli
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: MoE4All-PR21-windows-x86_64
+          name: MoE4All-PR21-8GBfix-windows-x86_64
           path: target/release/infr.exe
           if-no-files-found: error
           retention-days: 14
