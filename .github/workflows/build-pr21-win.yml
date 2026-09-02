@@ -51,30 +51,24 @@ jobs:
           $new1 = 'const WINDOWS_LARGE_REBAR_LOAD_DRIVER_RESERVE: u64 = 1 * 1024 * 1024 * 1024;'
           if ($t.Contains($old1)) {
               $t = $t.Replace($old1, $new1)
-              Write-Host '[OK] load_driver: 2GB -> 1GB'
+              Write-Host "[OK] load_driver: 2GB -> 1GB"
           } else {
               throw 'PATCH1 anchor not found'
           }
 
           # 2) runtime margin：仅 total_room < 8GB 的设备钳制到 768MB；大卡保持原值
+          #    单行替换，避免 YAML 块缩进问题（Rust 中 if-else 表达式单行合法）
           $old2 = '.prepare_moe_unified_vram(&specs, plan.runtime_reserve_bytes as usize)'
-          $new2 = @'
-.prepare_moe_unified_vram(&specs,
-                if plan.total_room_bytes < 8 * 1024 * 1024 * 1024 {
-                    (plan.runtime_reserve_bytes as usize).min(768 * 1024 * 1024)
-                } else {
-                    plan.runtime_reserve_bytes as usize
-                })
-'@
+          $new2 = '.prepare_moe_unified_vram(&specs, if plan.total_room_bytes < 8 * 1024 * 1024 * 1024 { (plan.runtime_reserve_bytes as usize).min(768 * 1024 * 1024) } else { plan.runtime_reserve_bytes as usize })'
           if ($t.Contains($old2)) {
               $t = $t.Replace($old2, $new2)
-              Write-Host '[OK] runtime margin: clamped to 768MB only when total_room < 8GB'
+              Write-Host "[OK] runtime margin: clamped to 768MB only when total_room < 8GB"
           } else {
               throw 'PATCH2 anchor not found'
           }
 
           [System.IO.File]::WriteAllText($p, $t, [System.Text.UTF8Encoding]::new($false))
-          Write-Host '[OK] patched seam/mod.rs'
+          Write-Host "[OK] patched seam/mod.rs"
 
       - name: Build infr.exe
         run: cargo build --release --locked -p infr-cli
