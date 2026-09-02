@@ -1,0 +1,47 @@
+name: Build MoE4All PR21 (Vision+ViewModel)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: '-C target-cpu=x86-64 -C target-feature=+crt-static'
+  VULKAN_SDK_VERSION: '1.4.357.0'
+
+jobs:
+  build:
+    name: Build MoE4All Windows (PR #21)
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: Headmaster218/MoE4All
+          ref: refs/pull/21/head
+          fetch-depth: 1
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+      - run: rustup update --no-self-update stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan shader compiler
+        shell: pwsh
+        run: .\scripts\install-vulkan-sdk-windows.ps1
+
+      - name: Build infr.exe
+        run: cargo build --release --locked -p infr-cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: MoE4All-PR21-windows-x86_64
+          path: target/release/infr.exe
+          if-no-files-found: error
+          retention-days: 14
