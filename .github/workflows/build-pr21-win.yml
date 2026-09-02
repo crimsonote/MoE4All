@@ -1,7 +1,8 @@
 # Build MoE4All Windows package from PR #21 (MTP + Vision)
-# + 8GB-VRAM patch:
-#   1) load_driver 2GB→1GB（WDDM 沉淀税砍半，7600 真实开销远小于 7900 XTX）
-#   2) runtime margin 仅在小显存设备(<8GB)钳制到 768MB；大卡保持原值不受影响
+# + 8GB-VRAM patch (3 处，全部仅影响 <8GB 设备)：
+#   1) load_driver 2GB→1GB（WDDM ReBAR 沉淀税，7600 远小于 7900 XTX）
+#   2) prepare_moe_unified_vram 的 runtime margin 钳制 768MB
+#   3) 生产路径 runtime_reserve 封顶，维持 4:1 设计语义的 8GB 可行近似
 name: Build MoE4All PR21 (Vision+ViewModel)
 
 on:
@@ -46,29 +47,45 @@ jobs:
           $t = Get-Content $p -Raw
           if (-not $t) { throw "cannot read $p" }
 
-          # 1) WDDM ReBAR 沉淀税 2GB -> 1GB（所有设备皆可受益；8GB 卡是刚需）
+          # ── PATCH1 ──────────────────────────────────────────────
+          # WDDM ReBAR 沉淀税 2GB -> 1GB。该值在 7900 XTX 上实测标定，
+          # 7600 的 ReBAR 映射规模小得多，1GB 仍是保守值（所有设备受益）。
           $old1 = 'const WINDOWS_LARGE_REBAR_LOAD_DRIVER_RESERVE: u64 = 2 * 1024 * 1024 * 1024;'
           $new1 = 'const WINDOWS_LARGE_REBAR_LOAD_DRIVER_RESERVE: u64 = 1 * 1024 * 1024 * 1024;'
           if ($t.Contains($old1)) {
               $t = $t.Replace($old1, $new1)
-              Write-Host "[OK] load_driver: 2GB -> 1GB"
-          } else {
-              throw 'PATCH1 anchor not found'
-          }
+              Write-Host '[OK] P1 load_driver: 2GB -> 1GB'
+          } else { throw 'PATCH1 anchor not found' }
 
-          # 2) runtime margin：仅 total_room < 8GB 的设备钳制到 768MB；大卡保持原值
-          #    单行替换，避免 YAML 块缩进问题（Rust 中 if-else 表达式单行合法）
+          # ── PATCH2 ──────────────────────────────────────────────
+          # unified arena 里 runtime margin 独立 shard 钳制 768MB（仅 <8GB 卡）。
+          # 768MB = 实测 Qwen35 单层 prefill 峰值(≈730MB) + 缓冲；
+          # 大卡保持 PR21 原值，防 wedge 语义不受影响。
           $old2 = '.prepare_moe_unified_vram(&specs, plan.runtime_reserve_bytes as usize)'
           $new2 = '.prepare_moe_unified_vram(&specs, if plan.total_room_bytes < 8 * 1024 * 1024 * 1024 { (plan.runtime_reserve_bytes as usize).min(768 * 1024 * 1024) } else { plan.runtime_reserve_bytes as usize })'
           if ($t.Contains($old2)) {
               $t = $t.Replace($old2, $new2)
-              Write-Host "[OK] runtime margin: clamped to 768MB only when total_room < 8GB"
-          } else {
-              throw 'PATCH2 anchor not found'
-          }
+              Write-Host '[OK] P2 unified margin: clamp 768MB (<8GB)'
+          } else { throw 'PATCH2 anchor not found' }
+
+          # ── PATCH3 ──────────────────────────────────────────────
+          # 设计对齐：源码 elastic_pool 的目标是 专家:弹性预留 ≈ 4:1
+          #   (测试断言 elastic_pool_bytes(4GiB) == 5GiB)。
+          # 8GB 卡上严格 4:1 需 runtime <= 394MB（由 E=T-F-R-D-... 与 (R+D)<=E/4 联立），
+          # 低于 v0.5.2 实测的 0.58GB 真实需求，会压垮 prefill。
+          # 故取 8GB 可行近似：runtime 封顶 = room/10 ≈ 750MB
+          #   → 实际比例 ≈ 2.4:1（专家 2.66GB : 弹性 1.11GB），
+          #   保留真实 prefill scratch 又能让专家缓存翻倍。
+          # 大卡 (`room >= 8GiB`) 保持原值 u64::MAX=不封顶，PR21 4:1 设计原样。
+          $old3 = 'selected_ubatch, k_fmt, v_fmt);'
+          $new3 = 'selected_ubatch, k_fmt, v_fmt).min(if room < 8 * 1024 * 1024 * 1024 { room / 10 } else { u64::MAX });'
+          if ($t.Contains($old3)) {
+              $t = $t.Replace($old3, $new3)
+              Write-Host '[OK] P3 runtime_reserve: cap room/10 (<8GB, ~2.4:1 vs 4:1 design)'
+          } else { throw 'PATCH3 anchor not found' }
 
           [System.IO.File]::WriteAllText($p, $t, [System.Text.UTF8Encoding]::new($false))
-          Write-Host "[OK] patched seam/mod.rs"
+          Write-Host '[OK] patched seam/mod.rs (P1+P2+P3)'
 
       - name: Build infr.exe
         run: cargo build --release --locked -p infr-cli
