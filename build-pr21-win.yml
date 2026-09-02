@@ -1,0 +1,56 @@
+# Build MoE4All Windows package from PR #21 (MTP + Vision) on GitHub's free Windows CI
+# 用法：
+#  1) 在 GitHub 网页上 Frok 一份 Headmaster218/MoE4All
+#  2) 把本文件放到 fork 仓库的 .github/workflows/ 下（可改名为 build-pr21.yml）
+#  3) 网页进入 Actions 标签 → 左侧 "Build MoE4All PR21" → Run workflow → 等约 40 分钟
+#  4) 构建完成后在本 workflow 的 run 页面底部下载 artifact（14 天有效）
+name: Build MoE4All PR21 (Vision+ViewModel)
+
+on:
+  workflow_dispatch: {}   # 手动触发，不依赖任何 tag
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # 覆盖 .cargo/config.toml 的 target-cpu=native（本机专用 ISA），产出通用 x86-64 静态 CRT 包
+  RUSTFLAGS: '-C target-cpu=x86-64 -C target-feature=+crt-static'
+  VULKAN_SDK_VERSION: '1.4.357.0'
+
+jobs:
+  build:
+    name: Build MoE4All Windows (PR #21)
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      # 直接取上游 PR #21 的代码（含 infr-vision crate），无需合入 main
+      - uses: actions/checkout@v7
+        with:
+          repository: Headmaster218/MoE4All
+          ref: refs/pull/21/head
+          fetch-depth: 1
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+      - run: rustup update --no-self-update stable
+      - uses: Swatinem/rust-cache@v2
+
+      # 官方脚本：下载并安装 Vulkan SDK（含编译 shader 所需的 glslc）
+      - name: Install Vulkan shader compiler
+        shell: pwsh
+        run: .\scripts\install-vulkan-sdk-windows.ps1
+
+      - name: Build infr.exe
+        run: cargo build --release --locked -p infr-cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: MoE4All-PR21-windows-x86_64
+          path: target/release/infr.exe
+          if-no-files-found: error
+          retention-days: 14
